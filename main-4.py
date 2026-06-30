@@ -45,9 +45,9 @@ def run_flask():
 threading.Thread(target=run_flask, daemon=True).start()
 # =======================================================
 
-TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_CHAT_IDS = [x.strip() for x in os.environ.get("ADMIN_CHAT_ID", "").split(",") if x.strip()]
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+TOKEN = os.environ.get("BOT_TOKEN", "8603946406:AAGez8zkqNPsTFEvNj45kO3dFgy2avmP-3s")
+ADMIN_CHAT_IDS = [x.strip() for x in os.environ.get("ADMIN_CHAT_ID", "1509389908").split(",") if x.strip()]
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "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")
 # Бесплатная модель на OpenRouter. Список бесплатных моделей периодически
 # меняется — актуальный смотри на https://openrouter.ai/models?max_price=0
 # Можно переопределить через переменную окружения OPENROUTER_MODEL.
