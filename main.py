@@ -1,41 +1,41 @@
 import os
-import sys
-import logging
-from telegram import (
-    Update,
-    InlineKeyboardButton,
+import threading
+import telebot
+from telebot.types import (
     InlineKeyboardMarkup,
+    InlineKeyboardButton,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     KeyboardButton,
 )
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ConversationHandler,
-    ContextTypes,
-    filters,
-)
+from flask import Flask
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+# ============== MINI WEBSERVER ДЛЯ RENDER ==============
+app = Flask(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8603946406:AAGez8zkqNPsTFEvNj45kO3dFgy2avmP-3s")
-ADMIN_CHAT_IDS = [x.strip() for x in os.environ.get("ADMIN_CHAT_ID", "8603946406").split(",") if x.strip()]
-PORT = int(os.environ.get("PORT", "10000"))
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
-if not BOT_TOKEN:
-    logger.error("Не задан BOT_TOKEN в переменных окружения!")
+@app.route("/")
+def home():
+    return "🖥 PC Bot is alive!"
 
-# ---------------------------------------------------------------------------
-# Данные для конфигуратора и подбора БП (отредактируй под себя)
-# ---------------------------------------------------------------------------
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+
+threading.Thread(target=run_flask, daemon=True).start()
+# =======================================================
+
+TOKEN = os.environ.get("BOT_TOKEN", "8603946406:AAGez8zkqNPsTFEvNj45kO3dFgy2avmP-3s")
+ADMIN_CHAT_IDS = [x.strip() for x in os.environ.get("ADMIN_CHAT_ID", "1509389908").split(",") if x.strip()]
+
+if not TOKEN:
+    raise RuntimeError("Не задан BOT_TOKEN в переменных окружения!")
+
+bot = telebot.TeleBot(TOKEN)
+
+# ===================== ДАННЫЕ (отредактируй под себя) =====================
 
 CPU_LIST = {
     "Intel Core i3-12100F": 60,
@@ -49,7 +49,7 @@ CPU_LIST = {
 }
 
 GPU_LIST = {
-    "Без видеокарты (встроенная)": 0,
+    "Без видеокарты": 0,
     "RTX 4060": 115,
     "RTX 4060 Ti": 160,
     "RTX 4070": 200,
@@ -63,390 +63,304 @@ GPU_LIST = {
 RAM_LIST = ["8 ГБ", "16 ГБ", "32 ГБ", "64 ГБ"]
 STORAGE_LIST = ["SSD 512 ГБ", "SSD 1 ТБ", "SSD 1 ТБ + HDD 2 ТБ", "SSD 2 ТБ"]
 CASE_LIST = ["Бюджетный", "Средний с подсветкой", "Премиум / стекло"]
-
 SERVICE_OPTIONS = ["Выезд на дом", "Доставка по почте/СДЭК", "Принести к нам"]
-
-# ---------------------------------------------------------------------------
-# Состояния диалогов
-# ---------------------------------------------------------------------------
-(
-    MENU,
-    CFG_CPU, CFG_GPU, CFG_RAM, CFG_STORAGE, CFG_CASE, CFG_NAME, CFG_PHONE, CFG_SERVICE,
-    PSU_CPU, PSU_GPU,
-    REPAIR_DESC, REPAIR_NAME, REPAIR_PHONE, REPAIR_SERVICE,
-) = range(15)
 
 CONTACT_BTN = "📱 Отправить номер телефона"
 
+# Состояния пользователей храним в памяти процесса (этого достаточно для одного инстанса)
+user_state = {}
+
+# ===================== КЛАВИАТУРЫ =====================
+
 
 def main_menu_kb():
-    kb = [
-        [InlineKeyboardButton("🖥 Конфигуратор ПК", callback_data="menu_config")],
-        [InlineKeyboardButton("⚡ Подбор блока питания", callback_data="menu_psu")],
-        [InlineKeyboardButton("🔧 Ремонт техники", callback_data="menu_repair")],
-        [InlineKeyboardButton("ℹ️ О нас", callback_data="menu_about")],
-    ]
-    return InlineKeyboardMarkup(kb)
-
-
-def buttons_from_dict(prefix, items):
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(name, callback_data=f"{prefix}|{name}")] for name in items]
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton("🖥 Конфигуратор ПК", callback_data="menu_config"),
+        InlineKeyboardButton("⚡ Подбор блока питания", callback_data="menu_psu"),
+        InlineKeyboardButton("🔧 Ремонт техники", callback_data="menu_repair"),
+        InlineKeyboardButton("ℹ️ О нас", callback_data="menu_about"),
     )
+    return markup
 
 
-def buttons_from_list(prefix, items):
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton(item, callback_data=f"{prefix}|{item}")] for item in items]
-    )
+def kb_from_dict(prefix, items):
+    markup = InlineKeyboardMarkup(row_width=1)
+    for name in items:
+        markup.add(InlineKeyboardButton(name, callback_data=f"{prefix}|{name}"))
+    return markup
 
 
-async def notify_admin(context: ContextTypes.DEFAULT_TYPE, text: str):
+def kb_from_list(prefix, items):
+    markup = InlineKeyboardMarkup(row_width=1)
+    for item in items:
+        markup.add(InlineKeyboardButton(item, callback_data=f"{prefix}|{item}"))
+    return markup
+
+
+def contact_kb():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add(KeyboardButton(CONTACT_BTN, request_contact=True))
+    return markup
+
+
+def notify_admin(text):
     for chat_id in ADMIN_CHAT_IDS:
         try:
-            await context.bot.send_message(chat_id=chat_id, text=text)
+            bot.send_message(chat_id, text)
         except Exception as e:
-            logger.error("Не удалось отправить админу %s: %s", chat_id, e)
+            print(f"Не удалось отправить админу {chat_id}: {e}")
 
 
-# ---------------------------------------------------------------------------
-# /start и главное меню
-# ---------------------------------------------------------------------------
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    text = (
-        "Привет! 👋 Это бот-помощник по сборке и ремонту компьютеров.\n\n"
-        "Выбери, что нужно:"
-    )
-    if update.message:
-        await update.message.reply_text(text, reply_markup=main_menu_kb())
-    else:
-        await update.callback_query.edit_message_text(text, reply_markup=main_menu_kb())
-    return MENU
-
-
-async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    choice = query.data
-
-    if choice == "menu_config":
-        context.user_data["config"] = {}
-        await query.edit_message_text("Выбери процессор:", reply_markup=buttons_from_dict("cpu", CPU_LIST))
-        return CFG_CPU
-
-    if choice == "menu_psu":
-        await query.edit_message_text("Подбор БП.\nВыбери процессор:", reply_markup=buttons_from_dict("psucpu", CPU_LIST))
-        return PSU_CPU
-
-    if choice == "menu_repair":
-        await query.edit_message_text(
-            "Опиши кратко, что случилось с устройством (например: «не включается ноутбук», «разбит экран телефона» и т.п.):"
-        )
-        return REPAIR_DESC
-
-    if choice == "menu_about":
-        await query.edit_message_text(
-            "Мы собираем ПК под ключ и ремонтируем технику.\n"
-            "Чтобы вернуться в меню — введи /start",
-        )
-        return ConversationHandler.END
-
-    return MENU
-
-
-# ---------------------------------------------------------------------------
-# Конфигуратор ПК
-# ---------------------------------------------------------------------------
-
-async def cfg_cpu_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    _, name = query.data.split("|", 1)
-    context.user_data["config"]["cpu"] = name
-    await query.edit_message_text("Выбери видеокарту:", reply_markup=buttons_from_dict("gpu", GPU_LIST))
-    return CFG_GPU
-
-
-async def cfg_gpu_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    _, name = query.data.split("|", 1)
-    context.user_data["config"]["gpu"] = name
-    await query.edit_message_text("Выбери объём оперативной памяти:", reply_markup=buttons_from_list("ram", RAM_LIST))
-    return CFG_RAM
-
-
-async def cfg_ram_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    _, name = query.data.split("|", 1)
-    context.user_data["config"]["ram"] = name
-    await query.edit_message_text("Выбери накопитель:", reply_markup=buttons_from_list("storage", STORAGE_LIST))
-    return CFG_STORAGE
-
-
-async def cfg_storage_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    _, name = query.data.split("|", 1)
-    context.user_data["config"]["storage"] = name
-    await query.edit_message_text("Выбери корпус:", reply_markup=buttons_from_list("case", CASE_LIST))
-    return CFG_CASE
-
-
-async def cfg_case_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    _, name = query.data.split("|", 1)
-    context.user_data["config"]["case"] = name
-
-    cpu_w = CPU_LIST.get(context.user_data["config"]["cpu"], 65)
-    gpu_w = GPU_LIST.get(context.user_data["config"]["gpu"], 0)
-    recommended_psu = round((cpu_w + gpu_w) * 1.4 / 50) * 50
-    recommended_psu = max(recommended_psu, 450)
-    context.user_data["config"]["psu"] = f"~{recommended_psu} Вт (рекомендация)"
-
-    cfg = context.user_data["config"]
-    summary = (
-        "Твоя сборка готова:\n\n"
-        f"Процессор: {cfg['cpu']}\n"
-        f"Видеокарта: {cfg['gpu']}\n"
-        f"ОЗУ: {cfg['ram']}\n"
-        f"Накопитель: {cfg['storage']}\n"
-        f"Корпус: {cfg['case']}\n"
-        f"Рекомендуемый БП: {cfg['psu']}\n\n"
-        "Чтобы мы посчитали стоимость и связались с тобой, напиши, пожалуйста, своё имя:"
-    )
-    await query.edit_message_text(summary)
-    return CFG_NAME
-
-
-async def cfg_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["config"]["name"] = update.message.text.strip()
-    contact_kb = ReplyKeyboardMarkup(
-        [[KeyboardButton(CONTACT_BTN, request_contact=True)]],
-        resize_keyboard=True, one_time_keyboard=True,
-    )
-    await update.message.reply_text(
-        "Отлично! Теперь отправь номер телефона кнопкой ниже или напиши его текстом:",
-        reply_markup=contact_kb,
-    )
-    return CFG_PHONE
-
-
-async def cfg_phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.contact:
-        phone = update.message.contact.phone_number
-    else:
-        phone = update.message.text.strip()
-    context.user_data["config"]["phone"] = phone
-
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(opt, callback_data=f"cfgservice|{opt}")] for opt in SERVICE_OPTIONS]
-    )
-    await update.message.reply_text(
-        "Как удобнее получить/собрать ПК?", reply_markup=ReplyKeyboardRemove()
-    )
-    await update.message.reply_text("Выбери вариант:", reply_markup=kb)
-    return CFG_SERVICE
-
-
-async def cfg_service_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    _, service = query.data.split("|", 1)
-    cfg = context.user_data["config"]
-    cfg["service"] = service
-
-    admin_text = (
-        "🆕 Новая заявка — КОНФИГУРАТОР ПК\n\n"
-        f"Имя: {cfg['name']}\n"
-        f"Телефон: {cfg['phone']}\n"
-        f"Способ получения: {cfg['service']}\n\n"
-        f"Процессор: {cfg['cpu']}\n"
-        f"Видеокарта: {cfg['gpu']}\n"
-        f"ОЗУ: {cfg['ram']}\n"
-        f"Накопитель: {cfg['storage']}\n"
-        f"Корпус: {cfg['case']}\n"
-        f"Рекомендуемый БП: {cfg['psu']}"
-    )
-    await notify_admin(context, admin_text)
-
-    await query.edit_message_text(
-        "Спасибо! Заявка отправлена, мы свяжемся с тобой в ближайшее время. 🙌\n"
-        "Чтобы начать заново — /start"
-    )
-    return ConversationHandler.END
-
-
-# ---------------------------------------------------------------------------
-# Подбор БП
-# ---------------------------------------------------------------------------
-
-async def psu_cpu_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    _, name = query.data.split("|", 1)
-    context.user_data["psu_cpu"] = name
-    await query.edit_message_text("Выбери видеокарту:", reply_markup=buttons_from_dict("psugpu", GPU_LIST))
-    return PSU_GPU
-
-
-async def psu_gpu_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    _, name = query.data.split("|", 1)
-    cpu_w = CPU_LIST.get(context.user_data["psu_cpu"], 65)
-    gpu_w = GPU_LIST.get(name, 0)
+def calc_psu(cpu_name, gpu_name):
+    cpu_w = CPU_LIST.get(cpu_name, 65)
+    gpu_w = GPU_LIST.get(gpu_name, 0)
     recommended = round((cpu_w + gpu_w) * 1.4 / 50) * 50
-    recommended = max(recommended, 450)
-
-    await query.edit_message_text(
-        f"Процессор: {context.user_data['psu_cpu']} (~{cpu_w} Вт)\n"
-        f"Видеокарта: {name} (~{gpu_w} Вт)\n\n"
-        f"💡 Рекомендуемая мощность БП: от {recommended} Вт (с запасом на пики и апгрейд).\n\n"
-        "Чтобы начать заново — /start, чтобы собрать полную сборку — открой «Конфигуратор ПК» в меню."
-    )
-    return ConversationHandler.END
+    return max(recommended, 450), cpu_w, gpu_w
 
 
-# ---------------------------------------------------------------------------
-# Ремонт
-# ---------------------------------------------------------------------------
-
-async def repair_desc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["repair"] = {"desc": update.message.text.strip()}
-    await update.message.reply_text("Как к тебе обращаться? Напиши имя:")
-    return REPAIR_NAME
+# ===================== /start и ГЛАВНОЕ МЕНЮ =====================
 
 
-async def repair_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["repair"]["name"] = update.message.text.strip()
-    contact_kb = ReplyKeyboardMarkup(
-        [[KeyboardButton(CONTACT_BTN, request_contact=True)]],
-        resize_keyboard=True, one_time_keyboard=True,
-    )
-    await update.message.reply_text(
-        "Отправь номер телефона кнопкой ниже или напиши текстом:",
-        reply_markup=contact_kb,
-    )
-    return REPAIR_PHONE
-
-
-async def repair_phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.contact:
-        phone = update.message.contact.phone_number
-    else:
-        phone = update.message.text.strip()
-    context.user_data["repair"]["phone"] = phone
-
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(opt, callback_data=f"repairservice|{opt}")] for opt in SERVICE_OPTIONS]
-    )
-    await update.message.reply_text("Номер получен ✅", reply_markup=ReplyKeyboardRemove())
-    await update.message.reply_text("Как удобнее провести ремонт?", reply_markup=kb)
-    return REPAIR_SERVICE
-
-
-async def repair_service_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    _, service = query.data.split("|", 1)
-    rep = context.user_data["repair"]
-    rep["service"] = service
-
-    admin_text = (
-        "🛠 Новая заявка — РЕМОНТ\n\n"
-        f"Имя: {rep['name']}\n"
-        f"Телефон: {rep['phone']}\n"
-        f"Способ: {rep['service']}\n"
-        f"Описание проблемы: {rep['desc']}"
-    )
-    await notify_admin(context, admin_text)
-
-    await query.edit_message_text(
-        "Спасибо! Заявка на консультацию по ремонту отправлена, мы скоро свяжемся. 🙌\n"
-        "Чтобы начать заново — /start"
-    )
-    return ConversationHandler.END
-
-
-# ---------------------------------------------------------------------------
-# Отмена / прочее
-# ---------------------------------------------------------------------------
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("Окей, отменил. Чтобы начать заново — /start", reply_markup=ReplyKeyboardRemove())
-    return ConversationHandler.END
-
-
-async def fallback_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Не понял 🙂 Напиши /start чтобы открыть меню.")
-
-
-def build_application() -> Application:
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            MENU: [CallbackQueryHandler(menu_router)],
-
-            CFG_CPU: [CallbackQueryHandler(cfg_cpu_chosen, pattern=r"^cpu\|")],
-            CFG_GPU: [CallbackQueryHandler(cfg_gpu_chosen, pattern=r"^gpu\|")],
-            CFG_RAM: [CallbackQueryHandler(cfg_ram_chosen, pattern=r"^ram\|")],
-            CFG_STORAGE: [CallbackQueryHandler(cfg_storage_chosen, pattern=r"^storage\|")],
-            CFG_CASE: [CallbackQueryHandler(cfg_case_chosen, pattern=r"^case\|")],
-            CFG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, cfg_name_received)],
-            CFG_PHONE: [MessageHandler((filters.TEXT | filters.CONTACT) & ~filters.COMMAND, cfg_phone_received)],
-            CFG_SERVICE: [CallbackQueryHandler(cfg_service_chosen, pattern=r"^cfgservice\|")],
-
-            PSU_CPU: [CallbackQueryHandler(psu_cpu_chosen, pattern=r"^psucpu\|")],
-            PSU_GPU: [CallbackQueryHandler(psu_gpu_chosen, pattern=r"^psugpu\|")],
-
-            REPAIR_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, repair_desc_received)],
-            REPAIR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, repair_name_received)],
-            REPAIR_PHONE: [MessageHandler((filters.TEXT | filters.CONTACT) & ~filters.COMMAND, repair_phone_received)],
-            REPAIR_SERVICE: [CallbackQueryHandler(repair_service_chosen, pattern=r"^repairservice\|")],
-        },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
-        allow_reentry=True,
+@bot.message_handler(commands=["start"])
+def start(message):
+    user_state[message.from_user.id] = {}
+    bot.send_message(
+        message.chat.id,
+        "Привет! 👋 Это бот-помощник по сборке и ремонту компьютеров.\n\nВыбери, что нужно:",
+        reply_markup=main_menu_kb(),
     )
 
-    application.add_handler(conv)
-    application.add_handler(MessageHandler(filters.TEXT, fallback_text))
-    return application
+
+@bot.message_handler(commands=["cancel"])
+def cancel(message):
+    user_state[message.from_user.id] = {}
+    bot.send_message(message.chat.id, "Окей, отменил. Чтобы начать заново — /start", reply_markup=ReplyKeyboardRemove())
 
 
-def main():
-    if not BOT_TOKEN:
-        logger.error("BOT_TOKEN не задан. Останавливаюсь.")
-        sys.exit(1)
+# ===================== ОБРАБОТКА INLINE-КНОПОК =====================
 
-    application = build_application()
 
-    use_polling = "--polling" in sys.argv or not RENDER_EXTERNAL_URL
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    msg_id = call.message.message_id
+    data = call.data
+    state = user_state.setdefault(user_id, {})
 
-    if use_polling:
-        logger.info("Запуск в режиме polling (для локального теста).")
-        application.run_polling()
-    else:
-        # Это и есть "мини веб-сервис": run_webhook сам поднимает aiohttp-сервер
-        # на нужном порту, что удовлетворяет требованиям Render Web Service
-        # (Render проверяет, что приложение слушает $PORT).
-        webhook_path = "webhook"
-        webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/{webhook_path}"
-        logger.info("Запуск в режиме webhook: %s", webhook_url)
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=PORT,
-            url_path=webhook_path,
-            webhook_url=webhook_url,
+    # ---------- ГЛАВНОЕ МЕНЮ ----------
+    if data == "menu_config":
+        state["mode"] = "config"
+        state["config"] = {}
+        bot.edit_message_text("Выбери процессор:", chat_id, msg_id, reply_markup=kb_from_dict("cpu", CPU_LIST))
+
+    elif data == "menu_psu":
+        state["mode"] = "psu"
+        state["psu"] = {}
+        bot.edit_message_text("Подбор БП.\nВыбери процессор:", chat_id, msg_id, reply_markup=kb_from_dict("psucpu", CPU_LIST))
+
+    elif data == "menu_repair":
+        state["mode"] = "repair"
+        state["repair"] = {}
+        state["step"] = "desc"
+        bot.edit_message_text(
+            "Опиши кратко, что случилось с устройством "
+            "(например: «не включается ноутбук», «разбит экран телефона»):",
+            chat_id, msg_id,
         )
 
+    elif data == "menu_about":
+        bot.edit_message_text(
+            "Мы собираем ПК под ключ и ремонтируем технику.\nЧтобы вернуться в меню — введи /start",
+            chat_id, msg_id,
+        )
 
-if __name__ == "__main__":
-    main()
+    # ---------- КОНФИГУРАТОР ПК ----------
+    elif data.startswith("cpu|"):
+        state["config"]["cpu"] = data.split("|", 1)[1]
+        bot.edit_message_text("Выбери видеокарту:", chat_id, msg_id, reply_markup=kb_from_dict("gpu", GPU_LIST))
+
+    elif data.startswith("gpu|"):
+        state["config"]["gpu"] = data.split("|", 1)[1]
+        bot.edit_message_text("Выбери объём оперативной памяти:", chat_id, msg_id, reply_markup=kb_from_list("ram", RAM_LIST))
+
+    elif data.startswith("ram|"):
+        state["config"]["ram"] = data.split("|", 1)[1]
+        bot.edit_message_text("Выбери накопитель:", chat_id, msg_id, reply_markup=kb_from_list("storage", STORAGE_LIST))
+
+    elif data.startswith("storage|"):
+        state["config"]["storage"] = data.split("|", 1)[1]
+        bot.edit_message_text("Выбери корпус:", chat_id, msg_id, reply_markup=kb_from_list("case", CASE_LIST))
+
+    elif data.startswith("case|"):
+        state["config"]["case"] = data.split("|", 1)[1]
+        cfg = state["config"]
+        psu_w, cpu_w, gpu_w = calc_psu(cfg["cpu"], cfg["gpu"])
+        cfg["psu"] = f"~{psu_w} Вт (рекомендация)"
+
+        summary = (
+            "Твоя сборка готова:\n\n"
+            f"Процессор: {cfg['cpu']}\n"
+            f"Видеокарта: {cfg['gpu']}\n"
+            f"ОЗУ: {cfg['ram']}\n"
+            f"Накопитель: {cfg['storage']}\n"
+            f"Корпус: {cfg['case']}\n"
+            f"Рекомендуемый БП: {cfg['psu']}\n\n"
+            "Чтобы мы посчитали стоимость и связались с тобой, напиши, пожалуйста, своё имя:"
+        )
+        bot.edit_message_text(summary, chat_id, msg_id)
+        state["step"] = "config_name"
+
+    elif data.startswith("cfgservice|"):
+        service = data.split("|", 1)[1]
+        cfg = state["config"]
+        cfg["service"] = service
+        admin_text = (
+            "🆕 Новая заявка — КОНФИГУРАТОР ПК\n\n"
+            f"Имя: {cfg.get('name')}\n"
+            f"Телефон: {cfg.get('phone')}\n"
+            f"Способ получения: {service}\n\n"
+            f"Процессор: {cfg.get('cpu')}\n"
+            f"Видеокарта: {cfg.get('gpu')}\n"
+            f"ОЗУ: {cfg.get('ram')}\n"
+            f"Накопитель: {cfg.get('storage')}\n"
+            f"Корпус: {cfg.get('case')}\n"
+            f"Рекомендуемый БП: {cfg.get('psu')}"
+        )
+        notify_admin(admin_text)
+        bot.edit_message_text(
+            "Спасибо! Заявка отправлена, мы свяжемся с тобой в ближайшее время. 🙌\nЧтобы начать заново — /start",
+            chat_id, msg_id,
+        )
+        user_state[user_id] = {}
+
+    # ---------- ПОДБОР БП ----------
+    elif data.startswith("psucpu|"):
+        state["psu"]["cpu"] = data.split("|", 1)[1]
+        bot.edit_message_text("Выбери видеокарту:", chat_id, msg_id, reply_markup=kb_from_dict("psugpu", GPU_LIST))
+
+    elif data.startswith("psugpu|"):
+        gpu_name = data.split("|", 1)[1]
+        cpu_name = state["psu"]["cpu"]
+        psu_w, cpu_w, gpu_w = calc_psu(cpu_name, gpu_name)
+        bot.edit_message_text(
+            f"Процессор: {cpu_name} (~{cpu_w} Вт)\n"
+            f"Видеокарта: {gpu_name} (~{gpu_w} Вт)\n\n"
+            f"💡 Рекомендуемая мощность БП: от {psu_w} Вт (с запасом на пики и апгрейд).\n\n"
+            "Чтобы начать заново — /start, чтобы собрать полную сборку — открой «Конфигуратор ПК» в меню.",
+            chat_id, msg_id,
+        )
+        user_state[user_id] = {}
+
+    # ---------- РЕМОНТ ----------
+    elif data.startswith("repairservice|"):
+        service = data.split("|", 1)[1]
+        rep = state["repair"]
+        rep["service"] = service
+        admin_text = (
+            "🛠 Новая заявка — РЕМОНТ\n\n"
+            f"Имя: {rep.get('name')}\n"
+            f"Телефон: {rep.get('phone')}\n"
+            f"Способ: {service}\n"
+            f"Описание проблемы: {rep.get('desc')}"
+        )
+        notify_admin(admin_text)
+        bot.edit_message_text(
+            "Спасибо! Заявка на консультацию по ремонту отправлена, мы скоро свяжемся. 🙌\nЧтобы начать заново — /start",
+            chat_id, msg_id,
+        )
+        user_state[user_id] = {}
+
+    bot.answer_callback_query(call.id)
+
+
+# ===================== ОБРАБОТКА ТЕКСТА И КОНТАКТА =====================
+
+
+@bot.message_handler(content_types=["contact"])
+def handle_contact(message):
+    user_id = message.from_user.id
+    state = user_state.get(user_id, {})
+    phone = message.contact.phone_number
+    step = state.get("step")
+
+    if step == "config_phone":
+        state["config"]["phone"] = phone
+        bot.send_message(message.chat.id, "Номер получен ✅", reply_markup=ReplyKeyboardRemove())
+        bot.send_message(
+            message.chat.id, "Как удобнее получить/собрать ПК?",
+            reply_markup=kb_from_list("cfgservice", SERVICE_OPTIONS),
+        )
+        state["step"] = None
+
+    elif step == "repair_phone":
+        state["repair"]["phone"] = phone
+        bot.send_message(message.chat.id, "Номер получен ✅", reply_markup=ReplyKeyboardRemove())
+        bot.send_message(
+            message.chat.id, "Как удобнее провести ремонт?",
+            reply_markup=kb_from_list("repairservice", SERVICE_OPTIONS),
+        )
+        state["step"] = None
+
+
+@bot.message_handler(func=lambda m: True, content_types=["text"])
+def handle_text(message):
+    user_id = message.from_user.id
+    state = user_state.setdefault(user_id, {})
+    step = state.get("step")
+    text = message.text.strip()
+
+    if step == "config_name":
+        state["config"]["name"] = text
+        bot.send_message(
+            message.chat.id,
+            "Отлично! Теперь отправь номер телефона кнопкой ниже или напиши его текстом:",
+            reply_markup=contact_kb(),
+        )
+        state["step"] = "config_phone"
+        return
+
+    if step == "config_phone":
+        state["config"]["phone"] = text
+        bot.send_message(message.chat.id, "Номер получен ✅", reply_markup=ReplyKeyboardRemove())
+        bot.send_message(
+            message.chat.id, "Как удобнее получить/собрать ПК?",
+            reply_markup=kb_from_list("cfgservice", SERVICE_OPTIONS),
+        )
+        state["step"] = None
+        return
+
+    if step == "desc":
+        state["repair"]["desc"] = text
+        bot.send_message(message.chat.id, "Как к тебе обращаться? Напиши имя:")
+        state["step"] = "repair_name"
+        return
+
+    if step == "repair_name":
+        state["repair"]["name"] = text
+        bot.send_message(
+            message.chat.id,
+            "Отправь номер телефона кнопкой ниже или напиши текстом:",
+            reply_markup=contact_kb(),
+        )
+        state["step"] = "repair_phone"
+        return
+
+    if step == "repair_phone":
+        state["repair"]["phone"] = text
+        bot.send_message(message.chat.id, "Номер получен ✅", reply_markup=ReplyKeyboardRemove())
+        bot.send_message(
+            message.chat.id, "Как удобнее провести ремонт?",
+            reply_markup=kb_from_list("repairservice", SERVICE_OPTIONS),
+        )
+        state["step"] = None
+        return
+
+    bot.send_message(message.chat.id, "Не понял 🙂 Напиши /start чтобы открыть меню.")
+
+
+# ===================== ЗАПУСК =====================
+
+print("Бот запущен, мини веб-сервис поднят на Flask...")
+bot.infinity_polling(skip_pending=True)
