@@ -9,6 +9,7 @@ from telebot.types import (
     KeyboardButton,
 )
 from flask import Flask
+from anthropic import Anthropic
 
 # ============== MINI WEBSERVER ДЛЯ RENDER ==============
 app = Flask(__name__)
@@ -29,13 +30,16 @@ threading.Thread(target=run_flask, daemon=True).start()
 
 TOKEN = os.environ.get("BOT_TOKEN", "8603946406:AAGez8zkqNPsTFEvNj45kO3dFgy2avmP-3s")
 ADMIN_CHAT_IDS = [x.strip() for x in os.environ.get("ADMIN_CHAT_ID", "1509389908").split(",") if x.strip()]
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 if not TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN в переменных окружения!")
 
 bot = telebot.TeleBot(TOKEN)
+claude_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+AI_MODEL = "claude-sonnet-4-6"
 
-# ===================== ДАННЫЕ (отредактируй под себя) =====================
+# ===================== ДАННЫЕ ДЛЯ РУЧНОГО КОНФИГУРАТОРА И ПОДБОРА БП =====================
 
 CPU_LIST = {
     "Intel Core i3-12100F": 60,
@@ -66,9 +70,51 @@ CASE_LIST = ["Бюджетный", "Средний с подсветкой", "П
 SERVICE_OPTIONS = ["Выезд на дом", "Доставка по почте/СДЭК", "Принести к нам"]
 
 CONTACT_BTN = "📱 Отправить номер телефона"
+AI_FINISH_BTN = "✅ Готово, оформить заявку"
+AI_RESTART_BTN = "🔄 Начать подбор заново"
 
-# Состояния пользователей храним в памяти процесса (этого достаточно для одного инстанса)
+# Состояния пользователей храним в памяти процесса
 user_state = {}
+
+# ===================== СИСТЕМНЫЙ ПРОМПТ ДЛЯ ИИ-АГЕНТА =====================
+
+AI_SYSTEM_PROMPT = """Ты — опытный консультант компьютерного магазина и сборщик ПК.
+Твоя задача в диалоге с клиентом подобрать ПОЛНУЮ сборку ПК под его задачи и бюджет.
+
+Обязательно учитывай и предлагай ВСЕ компоненты:
+- Процессор (CPU)
+- Материнскую плату (сокет/чипсет должны совпадать с процессором)
+- Оперативную память (объём, частота)
+- Видеокарту (или без неё, если задачи офисные)
+- Накопитель (SSD/HDD, объём)
+- Систему охлаждения — обязательно уточни и предложи конкретный тип:
+  боксовый кулер (входит в комплект CPU), башенный воздушный кулер,
+  или жидкостное охлаждение (СВО/AIO 240/280/360мм) — в зависимости
+  от мощности процессора и бюджета.
+- Корпус — обязательно уточни и предложи форм-фактор (ATX, Micro-ATX, Mini-ITX)
+  в зависимости от размера материнской платы и пожеланий клиента (компактность,
+  вид через стекло, поток воздуха и т.д.).
+- Блок питания (рассчитывай мощность с запасом ~30-40% от пиковой нагрузки CPU+GPU).
+
+Стиль общения:
+- Общайся живо, по-человечески, на русском языке, без канцелярита.
+- Сначала кратко уточни 2-4 ключевых вопроса: бюджет, для чего ПК
+  (игры/работа/монтаж/офис), есть ли предпочтения по бренду (Intel/AMD,
+  Nvidia/AMD), нужна ли тишина или важнее производительность, нужен ли
+  Wi-Fi в материнке.
+- Не закидывай клиента стеной вопросов сразу — задавай по 2-3 вопроса
+  за раз, диалог должен быть живым.
+- Когда информации достаточно — предложи 1-2 варианта сборки (можно
+  "оптимальный" и "с запасом на будущее"), указав КОНКРЕТНЫЕ модели по
+  каждому компоненту из списка выше, включая охлаждение и корпус с
+  форм-фактором.
+- В конце сборки явно укажи итоговый список компонентов в виде понятного
+  перечня (каждый компонент на отдельной строке).
+- Если клиент просит что-то поменять — корректируй сборку.
+- Никогда не отвечай вне темы подбора/сборки ПК — вежливо возвращай к теме.
+- Не указывай точные цены в рублях/гривнах (цены и наличие уточнит менеджер),
+  можно говорить об уровне сборки (бюджетная/средняя/топовая).
+"""
 
 # ===================== КЛАВИАТУРЫ =====================
 
@@ -76,7 +122,8 @@ user_state = {}
 def main_menu_kb():
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(
-        InlineKeyboardButton("🖥 Конфигуратор ПК", callback_data="menu_config"),
+        InlineKeyboardButton("🤖 ИИ-подбор сборки ПК", callback_data="menu_ai_config"),
+        InlineKeyboardButton("🖥 Конфигуратор ПК (вручную)", callback_data="menu_config"),
         InlineKeyboardButton("⚡ Подбор блока питания", callback_data="menu_psu"),
         InlineKeyboardButton("🔧 Ремонт техники", callback_data="menu_repair"),
         InlineKeyboardButton("ℹ️ О нас", callback_data="menu_about"),
@@ -104,6 +151,15 @@ def contact_kb():
     return markup
 
 
+def ai_chat_kb():
+    markup = InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        InlineKeyboardButton(AI_FINISH_BTN, callback_data="ai_finish"),
+        InlineKeyboardButton(AI_RESTART_BTN, callback_data="ai_restart"),
+    )
+    return markup
+
+
 def notify_admin(text):
     for chat_id in ADMIN_CHAT_IDS:
         try:
@@ -117,6 +173,18 @@ def calc_psu(cpu_name, gpu_name):
     gpu_w = GPU_LIST.get(gpu_name, 0)
     recommended = round((cpu_w + gpu_w) * 1.4 / 50) * 50
     return max(recommended, 450), cpu_w, gpu_w
+
+
+def ask_claude(messages):
+    """Отправляет историю диалога в Claude API и возвращает текстовый ответ."""
+    response = claude_client.messages.create(
+        model=AI_MODEL,
+        max_tokens=1000,
+        system=AI_SYSTEM_PROMPT,
+        messages=messages,
+    )
+    parts = [block.text for block in response.content if block.type == "text"]
+    return "\n".join(parts).strip()
 
 
 # ===================== /start и ГЛАВНОЕ МЕНЮ =====================
@@ -150,17 +218,40 @@ def callback_handler(call):
     state = user_state.setdefault(user_id, {})
 
     # ---------- ГЛАВНОЕ МЕНЮ ----------
-    if data == "menu_config":
+    if data == "menu_ai_config":
+        if not claude_client:
+            bot.edit_message_text(
+                "ИИ-подбор временно недоступен (не настроен ключ ИИ). "
+                "Попробуй «Конфигуратор ПК (вручную)» или напиши нам напрямую.",
+                chat_id, msg_id, reply_markup=main_menu_kb(),
+            )
+        else:
+            state.clear()
+            state["mode"] = "ai_config"
+            state["step"] = "ai_chat"
+            state["ai_history"] = []
+            bot.edit_message_text(
+                "🤖 Я помогу подобрать сборку под твои задачи и бюджет.\n\n"
+                "Расскажи: для чего нужен ПК (игры/работа/монтаж/офис), "
+                "какой примерно бюджет и есть ли предпочтения по железу "
+                "(Intel/AMD, Nvidia/AMD)?",
+                chat_id, msg_id,
+            )
+
+    elif data == "menu_config":
+        state.clear()
         state["mode"] = "config"
         state["config"] = {}
         bot.edit_message_text("Выбери процессор:", chat_id, msg_id, reply_markup=kb_from_dict("cpu", CPU_LIST))
 
     elif data == "menu_psu":
+        state.clear()
         state["mode"] = "psu"
         state["psu"] = {}
         bot.edit_message_text("Подбор БП.\nВыбери процессор:", chat_id, msg_id, reply_markup=kb_from_dict("psucpu", CPU_LIST))
 
     elif data == "menu_repair":
+        state.clear()
         state["mode"] = "repair"
         state["repair"] = {}
         state["step"] = "desc"
@@ -176,7 +267,25 @@ def callback_handler(call):
             chat_id, msg_id,
         )
 
-    # ---------- КОНФИГУРАТОР ПК ----------
+    # ---------- ИИ-КОНФИГУРАТОР ----------
+    elif data == "ai_restart":
+        state["ai_history"] = []
+        state["step"] = "ai_chat"
+        bot.edit_message_text(
+            "Окей, начнём заново 🔄\n\nРасскажи: для чего нужен ПК, какой бюджет "
+            "и есть ли предпочтения по железу?",
+            chat_id, msg_id,
+        )
+
+    elif data == "ai_finish":
+        state["step"] = "ai_name"
+        bot.edit_message_text(
+            "Отлично! Чтобы менеджер посчитал точную стоимость и наличие — "
+            "напиши, пожалуйста, своё имя:",
+            chat_id, msg_id,
+        )
+
+    # ---------- РУЧНОЙ КОНФИГУРАТОР ПК ----------
     elif data.startswith("cpu|"):
         state["config"]["cpu"] = data.split("|", 1)[1]
         bot.edit_message_text("Выбери видеокарту:", chat_id, msg_id, reply_markup=kb_from_dict("gpu", GPU_LIST))
@@ -217,7 +326,7 @@ def callback_handler(call):
         cfg = state["config"]
         cfg["service"] = service
         admin_text = (
-            "🆕 Новая заявка — КОНФИГУРАТОР ПК\n\n"
+            "🆕 Новая заявка — КОНФИГУРАТОР ПК (ручной)\n\n"
             f"Имя: {cfg.get('name')}\n"
             f"Телефон: {cfg.get('phone')}\n"
             f"Способ получения: {service}\n\n"
@@ -248,7 +357,7 @@ def callback_handler(call):
             f"Процессор: {cpu_name} (~{cpu_w} Вт)\n"
             f"Видеокарта: {gpu_name} (~{gpu_w} Вт)\n\n"
             f"💡 Рекомендуемая мощность БП: от {psu_w} Вт (с запасом на пики и апгрейд).\n\n"
-            "Чтобы начать заново — /start, чтобы собрать полную сборку — открой «Конфигуратор ПК» в меню.",
+            "Чтобы начать заново — /start, чтобы собрать полную сборку — открой «ИИ-подбор» или «Конфигуратор» в меню.",
             chat_id, msg_id,
         )
         user_state[user_id] = {}
@@ -267,7 +376,7 @@ def callback_handler(call):
         )
         notify_admin(admin_text)
         bot.edit_message_text(
-            "Спасибо! Заявка на консультацию по ремонту отправлена, мы скоро свяжемся. 🙌\nЧтобы начать заново — /start",
+            "Спасибо! Заявка на консультацию по ремонту отправлена, мы скоро свяжемся. 🙌\nЧто начать заново — /start",
             chat_id, msg_id,
         )
         user_state[user_id] = {}
@@ -275,7 +384,7 @@ def callback_handler(call):
     bot.answer_callback_query(call.id)
 
 
-# ===================== ОБРАБОТКА ТЕКСТА И КОНТАКТА =====================
+# ===================== ОБРАБОТКА КОНТАКТА (кнопкой) =====================
 
 
 @bot.message_handler(content_types=["contact"])
@@ -288,20 +397,56 @@ def handle_contact(message):
     if step == "config_phone":
         state["config"]["phone"] = phone
         bot.send_message(message.chat.id, "Номер получен ✅", reply_markup=ReplyKeyboardRemove())
-        bot.send_message(
-            message.chat.id, "Как удобнее получить/собрать ПК?",
-            reply_markup=kb_from_list("cfgservice", SERVICE_OPTIONS),
-        )
+        bot.send_message(message.chat.id, "Как удобнее получить/собрать ПК?", reply_markup=kb_from_list("cfgservice", SERVICE_OPTIONS))
         state["step"] = None
 
     elif step == "repair_phone":
         state["repair"]["phone"] = phone
         bot.send_message(message.chat.id, "Номер получен ✅", reply_markup=ReplyKeyboardRemove())
-        bot.send_message(
-            message.chat.id, "Как удобнее провести ремонт?",
-            reply_markup=kb_from_list("repairservice", SERVICE_OPTIONS),
-        )
+        bot.send_message(message.chat.id, "Как удобнее провести ремонт?", reply_markup=kb_from_list("repairservice", SERVICE_OPTIONS))
         state["step"] = None
+
+    elif step == "ai_phone":
+        state["ai_phone"] = phone
+        bot.send_message(message.chat.id, "Номер получен ✅", reply_markup=ReplyKeyboardRemove())
+        bot.send_message(message.chat.id, "Как удобнее получить/собрать ПК?", reply_markup=kb_from_list("aiservice", SERVICE_OPTIONS))
+        state["step"] = "ai_service"
+
+
+# отдельный хендлер для финального способа получения в ИИ-режиме
+@bot.callback_query_handler(func=lambda call: call.data.startswith("aiservice|"))
+def ai_service_chosen(call):
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    msg_id = call.message.message_id
+    state = user_state.setdefault(user_id, {})
+    service = call.data.split("|", 1)[1]
+
+    history_text = ""
+    for m in state.get("ai_history", []):
+        role = "Клиент" if m["role"] == "user" else "ИИ-консультант"
+        content = m["content"] if isinstance(m["content"], str) else str(m["content"])
+        history_text += f"{role}: {content}\n\n"
+
+    admin_text = (
+        "🤖 Новая заявка — ИИ-ПОДБОР СБОРКИ ПК\n\n"
+        f"Имя: {state.get('ai_name')}\n"
+        f"Телефон: {state.get('ai_phone')}\n"
+        f"Способ получения: {service}\n\n"
+        "Переписка с ИИ-консультантом:\n"
+        f"{history_text}"
+    )
+    notify_admin(admin_text)
+
+    bot.edit_message_text(
+        "Спасибо! Заявка с подобранной сборкой отправлена менеджеру, мы скоро свяжемся. 🙌\nЧтобы начать заново — /start",
+        chat_id, msg_id,
+    )
+    user_state[user_id] = {}
+    bot.answer_callback_query(call.id)
+
+
+# ===================== ОБРАБОТКА ТЕКСТА =====================
 
 
 @bot.message_handler(func=lambda m: True, content_types=["text"])
@@ -311,26 +456,56 @@ def handle_text(message):
     step = state.get("step")
     text = message.text.strip()
 
-    if step == "config_name":
-        state["config"]["name"] = text
+    # ---------- ИИ-КОНФИГУРАТОР: свободный диалог ----------
+    if step == "ai_chat":
+        state.setdefault("ai_history", []).append({"role": "user", "content": text})
+        bot.send_chat_action(message.chat.id, "typing")
+        try:
+            reply = ask_claude(state["ai_history"])
+        except Exception as e:
+            print(f"Ошибка ИИ-API: {e}")
+            bot.send_message(
+                message.chat.id,
+                "Упс, не получилось связаться с ИИ-консультантом. Попробуй ещё раз чуть позже "
+                "или воспользуйся «Конфигуратор ПК (вручную)» в меню /start.",
+            )
+            return
+        state["ai_history"].append({"role": "assistant", "content": reply})
+        bot.send_message(message.chat.id, reply, reply_markup=ai_chat_kb())
+        return
+
+    if step == "ai_name":
+        state["ai_name"] = text
         bot.send_message(
             message.chat.id,
-            "Отлично! Теперь отправь номер телефона кнопкой ниже или напиши его текстом:",
+            "Отправь номер телефона кнопкой ниже или напиши его текстом:",
             reply_markup=contact_kb(),
         )
+        state["step"] = "ai_phone"
+        return
+
+    if step == "ai_phone":
+        state["ai_phone"] = text
+        bot.send_message(message.chat.id, "Номер получен ✅", reply_markup=ReplyKeyboardRemove())
+        bot.send_message(message.chat.id, "Как удобнее получить/собрать ПК?", reply_markup=kb_from_list("aiservice", SERVICE_OPTIONS))
+        state["step"] = "ai_service"
+        return
+
+    # ---------- РУЧНОЙ КОНФИГУРАТОР ----------
+    if step == "config_name":
+        state["config"]["name"] = text
+        bot.send_message(message.chat.id, "Отлично! Теперь отправь номер телефона кнопкой ниже или напиши его текстом:", reply_markup=contact_kb())
         state["step"] = "config_phone"
         return
 
     if step == "config_phone":
         state["config"]["phone"] = text
         bot.send_message(message.chat.id, "Номер получен ✅", reply_markup=ReplyKeyboardRemove())
-        bot.send_message(
-            message.chat.id, "Как удобнее получить/собрать ПК?",
-            reply_markup=kb_from_list("cfgservice", SERVICE_OPTIONS),
-        )
+        bot.send_message(message.chat.id, "Как удобнее получить/собрать ПК?", reply_markup=kb_from_list("cfgservice", SERVICE_OPTIONS))
         state["step"] = None
         return
 
+    # ---------- РЕМОНТ ----------
     if step == "desc":
         state["repair"]["desc"] = text
         bot.send_message(message.chat.id, "Как к тебе обращаться? Напиши имя:")
@@ -339,28 +514,10 @@ def handle_text(message):
 
     if step == "repair_name":
         state["repair"]["name"] = text
-        bot.send_message(
-            message.chat.id,
-            "Отправь номер телефона кнопкой ниже или напиши текстом:",
-            reply_markup=contact_kb(),
-        )
+        bot.send_message(message.chat.id, "Отправь номер телефона кнопкой ниже или напиши текстом:", reply_markup=contact_kb())
         state["step"] = "repair_phone"
         return
 
     if step == "repair_phone":
         state["repair"]["phone"] = text
-        bot.send_message(message.chat.id, "Номер получен ✅", reply_markup=ReplyKeyboardRemove())
-        bot.send_message(
-            message.chat.id, "Как удобнее провести ремонт?",
-            reply_markup=kb_from_list("repairservice", SERVICE_OPTIONS),
-        )
-        state["step"] = None
-        return
-
-    bot.send_message(message.chat.id, "Не понял 🙂 Напиши /start чтобы открыть меню.")
-
-
-# ===================== ЗАПУСК =====================
-
-print("Бот запущен, мини веб-сервис поднят на Flask...")
-bot.infinity_polling(skip_pending=True)
+        b
