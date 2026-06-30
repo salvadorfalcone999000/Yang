@@ -1,20 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Telegram-бот: ИИ-конфигуратор ПК (бесплатно, через OpenRouter), ручной
-конфигуратор, подбор БП, заявки на ремонт.
-
-Сделан на pyTelegramBotAPI (telebot) + мини веб-сервер на Flask в отдельном
-потоке — рабочая, проверенная схема для Render.
-
-Переменные окружения (Render -> Environment):
-  BOT_TOKEN           - токен бота от @BotFather
-  ADMIN_CHAT_ID       - твой chat_id (куда слать заявки), можно несколько через запятую
-  OPENROUTER_API_KEY  - бесплатный ключ с openrouter.ai для ИИ-агента
-  OPENROUTER_MODEL    - (необязательно) id бесплатной модели, по умолчанию
-                         deepseek/deepseek-chat-v3-0324:free
-  PORT                - подставляется Render автоматически, трогать не нужно
-"""
-
 import os
 import threading
 import telebot
