@@ -1,20 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Telegram-бот: конфигуратор ПК, подбор БП, заявки на ремонт.
-Работает через webhook и поднимает собственный мини веб-сервис,
-поэтому подходит для деплоя на Render (Web Service) через GitHub.
-
-Переменные окружения (задаются в Render -> Environment):
-  BOT_TOKEN          - токен бота от @BotFather
-  ADMIN_CHAT_ID       - твой chat_id (куда слать заявки), можно несколько через запятую
-  RENDER_EXTERNAL_URL - публичный URL сервиса на Render (Render подставляет его сам
-                         в переменную RENDER_EXTERNAL_URL автоматически, ничего делать не нужно)
-  PORT                - порт, Render подставляет сам автоматически
-
-Запуск локально для теста (polling):
-  BOT_TOKEN=xxx ADMIN_CHAT_ID=123 python main.py --polling
-"""
-
 import os
 import sys
 import logging
@@ -42,8 +25,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-ADMIN_CHAT_IDS = [x.strip() for x in os.environ.get("ADMIN_CHAT_ID", "").split(",") if x.strip()]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8603946406:AAGez8zkqNPsTFEvNj45kO3dFgy2avmP-3s")
+ADMIN_CHAT_IDS = [x.strip() for x in os.environ.get("ADMIN_CHAT_ID", "8603946406").split(",") if x.strip()]
 PORT = int(os.environ.get("PORT", "10000"))
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
